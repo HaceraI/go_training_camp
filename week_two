@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 	"log"
@@ -21,9 +20,10 @@ func main() {
 		w.Write([]byte("hello world!"))
 	})
 
-	serverOut := make(chan struct{})
+	serverShutdown := make(chan struct{})
 	mux.HandleFunc("/shutdown", func(w http.ResponseWriter, r *http.Request) {
-		serverOut <- struct{}{}
+		w.Write([]byte("Server in Shutdown..."))
+		serverShutdown <- struct{}{}
 	})
 
 	server := http.Server{
@@ -31,16 +31,26 @@ func main() {
 		Addr:    ":8080",
 	}
 
+	// 启动Serve
 	g.Go(func() error {
 		return server.ListenAndServe()
 	})
 
+	handleShutdown(g, ctx, serverShutdown, &server)
+	handleSignal(g, ctx)
+	
+	if err := g.Wait(); err != nil {
+		log.Printf("errgroup error: %+v\n", err)
+	}
+}
+
+func handleShutdown(g *errgroup.Group, ctx context.Context, serverShutdown chan struct{}, server *http.Server) {
 	g.Go(func() error {
 		select {
-		case <-ctx.Done():
-			log.Println("errgroup exit...")
-		case <-serverOut:
-			log.Println("server will out...")
+			case <-ctx.Done():
+				log.Println("errgroup exit...")
+			case <-serverShutdown:
+				log.Println("Server shutdown signal...")
 		}
 
 		timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -49,18 +59,18 @@ func main() {
 		log.Println("shutting down server...")
 		return server.Shutdown(timeoutCtx)
 	})
+}
 
+func handleSignal(g *errgroup.Group, ctx context.Context) {
 	g.Go(func() error {
 		quit := make(chan os.Signal, 0)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case sig := <-quit:
-			return errors.Errorf("get os signal: %v", sig)
+			case <-ctx.Done():
+				return ctx.Err()
+			case sig := <-quit:
+				return errors.Errorf("get os signal: %v", sig)
 		}
 	})
-
-	fmt.Printf("errgroup exiting: %+v\n", g.Wait())
 }
